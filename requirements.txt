@@ -1,0 +1,3 @@
+pick==1.4.0
+python-dotenv==0.20.0
+spotipy==2.20.0
