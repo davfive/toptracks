@@ -5,11 +5,129 @@ from functools import reduce
 from pathlib import Path
 from pick import pick
 from pprint import pprint
+import random
 import spotipy
 from spotipy.oauth2 import SpotifyOAuth
 import sys
 
-class SpotifyResults:
+SPOTIFY_ACCESS_SCOPES = [
+    'playlist-read-private',
+    'playlist-modify-public'
+]
+class PlaylistConfig(configparser.RawConfigParser):
+    _section_info = 'playlist.info'
+    _section_artists = 'playlist.artists'
+
+    def __init__(self, config_file):
+        self._file = config_file
+        super().__init__(allow_no_value=True)
+        self.read(self._file)
+        if not self._isvalid:
+            raise ValueError(f'Playlist config file ({self._file}) is invalid. Aborting.')
+        self._isdirty = False
+
+    @property
+    def artists(self):
+        return self.items(self._section_artists)
+    
+    def artist(self, name, spotify_url=None):
+        if not spotify_url:
+            return self.get(self._section_artists, name, fallback=None)
+        else:
+            self._isdirty = True
+            return super().set(self._section_artists, name, spotify_url)
+
+    @property
+    def has_missing_artists(self):
+        return len(self.missing_artists) > 0
+
+    @property
+    def missing_artists(self):
+        return [aname for aname,aurl in self.artists if aurl == None]
+
+    @property
+    def name(self):
+        return self.get(self._section_info, 'name', fallback=None)
+
+    @property
+    def desc(self):
+        return self.get(self._section_info, 'desc', fallback=None)
+
+    @property
+    def spotify_url(self):
+        return self.get(self._section_info, 'spotify_url', fallback=None)
+    
+    @spotify_url.setter
+    def spotify_url(self, url):
+        self._isdirty = True
+        return self.set(self._section_info, 'spotify_url', url)
+    
+    def save(self):
+        if self._isdirty:
+            print(self._file)
+            with open(self._file, 'w') as fp:
+                self.write(fp)
+            self._isdirty = False
+
+    def _isvalid(self):
+        has_sections = lambda: all((s in self.sections() for s in [self._section_info, self._section_artists]))
+        has_info = lambda: self.name and self.desc
+        has_artists = lambda: len(self.items(self._section_artists))
+        return has_sections() and has_info() and has_artists()
+
+class SpotifyAPI(spotipy.Spotify):
+    def __init__(self):
+        load_dotenv(dotenv_path=Path(f'{Path.home()}/.toptracks.env'))
+        super().__init__(auth_manager=SpotifyOAuth(scope=','.join(SPOTIFY_ACCESS_SCOPES)))
+
+    @property
+    def current_user(self):
+        return self.me()
+
+    def find_artist(self, artist_name):
+        matches = []
+        for results in SpotifyResultsGenerator(self, self.search, 'artists.next').get(f'name:{artist_name}', type='artist'):
+            artists = results['artists']
+            for i, artist in enumerate(artists['items']):
+                if artist['name'].casefold() == artist_name.casefold():
+                    matches.append(SpotifyArtist(artist))
+        return matches
+
+    def find_playlist(self, playcfg):
+        for playlists in SpotifyResultsGenerator(self, self.current_user_playlists).get():
+            for i, playlist in enumerate(playlists['items']):
+                if playlist['name'].casefold() == playcfg.name.casefold():
+                    return playlist
+        return None
+
+    def get_artist_toptracks(self, artist_url, max_tracks=5, randomize=True):
+        results = self.artist_top_tracks(artist_url)
+        if not results or len(results['tracks']) == 0:
+            return [] # Easier for caller to handle to have [] mean no artist toptracks
+
+        toptracks = [track['uri'] for track in results.get('tracks', [])]
+        max_tracks = max(0, min(len(toptracks), max_tracks))
+        
+        print(f'{artist_url}: {max_tracks} | {len(toptracks)}')
+        return random.sample(toptracks, k=max_tracks) if max_tracks else []
+
+class SpotifyArtist:
+    def __init__(self, spotify_artist_json):
+        self._json = spotify_artist_json
+
+    @property
+    def name(self):
+        return self._json.get('name', None)
+
+    @property
+    def spotify_url(self):
+        return self._json.get('external_urls', {}).get('spotify', None)
+
+    @property
+    def num_followers(self):
+        return self._json.get('followers', {}).get('total', 0)
+
+class SpotifyResultsGenerator:
     def __init__(self, sp, fn, subnext=None):
         self._sp = sp
         self._fn = fn
@@ -34,71 +152,45 @@ class SpotifyResults:
 
     def _hasnext(self, r):
         return reduce(lambda d,k: d.get(k,{}), [r]+self._nextpath.split('.'))
-# -- End SpotifyResults Class
 
-def find_artist(artist_name):
-    matches = []
-    for results in SpotifyResults(sp, sp.search, 'artists.next').get(f'name:{artist_name}', type='artist'):
-        artists = results['artists']
-        for i, artist in enumerate(artists['items']):
-            if artist['name'].casefold() == artist_name.casefold():
-                matches.append(artist)
-    return matches
 
-def find_playlist(playlist_name):
-    for playlists in SpotifyResults(sp, sp.current_user_playlists).get():
-        for i, playlist in enumerate(playlists['items']):
-            if playlist['name'].casefold() == playlist_name.casefold():
-                return playlist
-    return None
+# -- End Classes --
 
-def find_artist_toptracks(artist_url):
-    return sp.artist_top_tracks(artist_url)
+def find_playlist_artists(spotapi, playcfg):
+    artist_already_found = lambda a_url: a_url is not None and a_url.startswith('https://open.spotify.com/artist/')
+    get_artist_pickline = lambda a: f'{a.name}: {a.spotify_url} ({a.num_followers:,})' if a else 'Not listed'
 
-def get_playlist_artists(config, playlist_name, config_file):
-    get_artist_name = lambda artist: artist.get('name', None) if artist else None
-    get_artist_url = lambda artist: artist.get('external_urls', {}).get('spotify', 'No spotify url') if artist else None
-    get_artist_followers = lambda artist: artist.get('followers', {}).get('total', 0) if artist else 0
-    get_artist_choice = lambda artist: f'{get_artist_name(artist)}: {get_artist_url(artist)} ({get_artist_followers(artist):,})'
-
-    found_all = True
-    newly_found = False
-    for artist_name,artist_url in config.items(playlist_name):
-        if artist_url is not None and artist_url.startswith('https://open.spotify.com/artist/'):
-            # print(f'{artist_name}: {artist_url}')
+    for artist_name, artist_url in playcfg.artists:
+        if artist_already_found(artist_url):
             continue
 
-        artists = [a for a in find_artist(artist_name) if get_artist_followers(a) > 0]
-        if len(artists) > 1:
-            artists.append(None) # If none of the results are correct
-            artist, _ = pick(artists, f"Pick '{artist_name}' url: ", indicator='*', options_map_func=get_artist_choice)
-        elif len(artists) == 1:
-            artist = artists[0]
+        # Search Spotify WebAPI for artist by name
+        matching_artists = [a for a in spotapi.find_artist(artist_name) if a.num_followers > 0]
+        if len(matching_artists) > 1:
+            matching_artists.append(None) # If none of the results are correct
+            artist, _ = pick(matching_artists, f"Pick '{artist_name}' url: ", indicator='*', options_map_func=get_artist_pickline)
+        elif len(matching_artists) == 1:
+            artist = matching_artists[0]
         else:
             artist = None
+        if artist:
+            playcfg.artist(artist_name, artist.spotify_url)
 
-        newly_found += 1 if artist else 0
-        artist_url = get_artist_url(artist)
-        config.set(playlist_name, artist_name, artist_url)
-        # print(f'{artist_name}: {artist_url}')
+    playcfg.save()
+    return playcfg.has_missing_artists == False
 
-        if artist_url is None:
-            found_all = False
+def get_artists_toptracks(spotapi, playcfg, maxtracks_per_artist=5):
+    toptracks = []
+    for _, artist_url in playcfg.artists:
+        if artist_url: # ignore missing artists
+            artist_toptracks = spotapi.get_artist_toptracks(artist_url, max_tracks=maxtracks_per_artist)
+            toptracks.extend(artist_toptracks)
     
-    if newly_found > 0:
-        print(f'  saving found artists to {config_file} ...')
-        with open(config_file, 'w') as fp_config:
-            config.write(fp_config)
-    
-    return found_all == True
+    return toptracks
 
 if __name__ == '__main__':
-    load_dotenv(dotenv_path=Path('/Users/davidmay/.pyenv/newlistens.py.env'))
-    sp = spotipy.Spotify(auth_manager=SpotifyOAuth(scope='playlist-read-private,playlist-modify-public'))
-    current_user = sp.me()
-
     parser = argparse.ArgumentParser(description='Create playlist of top tracks from a list of artists.')
-    parser.add_argument('config_file', nargs=1, #type=argparse.FileType('rw'),
+    parser.add_argument('config_file', #type=argparse.FileType('rw'),
                         help='INI file with sections having lists of artists')
     parser.add_argument('--skip-missing-artists', '--sma', dest='skip_missing_artists', action='store_true',
                          help="Skip artists without resolved Spotify url.")
@@ -106,61 +198,48 @@ if __name__ == '__main__':
                         help="Max top tracks to include per artist")
     args = parser.parse_args()
 
-    config = configparser.RawConfigParser(allow_no_value=True)    
-    config.read(args.config_file)
+    spotapi = SpotifyAPI()
+    playcfg = PlaylistConfig(args.config_file)
 
-    playlist_sections = config.sections()
-    print(len(playlist_sections))
-    playlist_name = pick(playlist_sections, "Choose Playlist: ")[0] if len(playlist_sections) > 1 else playlist_sections[0]
-
-    print(f'Using: {playlist_name}')
+    print(f'Playlist: {playcfg.name}: {playcfg.desc}')
+    print()
     
-    print(f'Step: Ensure playlist does not exist yet ...')
-    playlist = find_playlist(playlist_name)
+    print(f'Step 1: Ensure playlist does not exist yet ...')
+    playlist = spotapi.find_playlist(playcfg)
     if playlist:
-        print(f"\nError: Playlist '{playlist_name}' already exists.\nAborting.")
+        print(f"Error: Playlist '{playcfg.name}' already exists.\nAborting.")
         sys.exit(1)
     
-    print(f'Step: Find playlist artists on Spotify ...')
-    if not get_playlist_artists(config, playlist_name, args.config_file):
-        if not args.skip_missing_artists:
-            print("\nError: Unable to find some artists. Please look them up manually:")
-            print("\n".join([f'  • {k}' for k,v in config.items(playlist_name) if not v]))
-            print("Aborting ...")
-            sys.exit(1)
-
-    print(f'Step: Find top tracks for artists ...')
-    #toptracks = get_playlist_artist_toptracks(config, playlist_name)
-    playlist_tracks = []
-    for artist_name, artist_url in config.items(playlist_name):
-        if not artist_url:
-            continue # Skip it if we got here
-
-        print(f"  getting top tracks for {artist_name} ...")
-        results = sp.artist_top_tracks(artist_url)
-        if not (results and len(results['tracks'])):
-            continue
-
-        artist_toptracks = results['tracks']
-        if artist_toptracks:
-            playlist_tracks.extend([track['uri'] for track in artist_toptracks[:args.max_toptracks]])
-
-    if len(playlist_tracks) == 0:
-        print(f'\nError: No artist top tracks found.\nAborting ...')
+    print(f'Step 2: Find playlist artists on Spotify ...')
+    find_playlist_artists(spotapi, playcfg)
+    if not args.skip_missing_artists and playcfg.has_missing_artists:
+        print("\nError: Unable to find some artists. Please look them up manually:")
+        print("\n".join([f'  • {artist_name}' for artist_name in playcfg.missing_artists]))
+        print("Aborting ...")
         sys.exit(1)
 
-    print(f'Step: Create public playlist ...')
-    new_playlist = sp.user_playlist_create(current_user['id'], playlist_name, description=f'Top {args.max_toptracks} tracks for each artist {playlist_name}')
+    print(f'Step 3: Find top tracks for artists ...')
+    toptracks = get_artists_toptracks(spotapi, playcfg)
+    if not toptracks:
+        print('\nError: No toptracks found for any artist in playlist. Aborting.')
+        sys.exit(1)
+
+    print(f'Step 4: Create public playlist {playcfg.name} ...')
+    new_playlist = spotapi.user_playlist_create(spotapi.current_user['id'], playcfg.name, description=playcfg.desc)
     playlist_url = new_playlist.get('external_urls', {}).get('spotify', None) if new_playlist else None
-    if playlist_url:
-        print(f'  created playlist: {playlist_url}')
-    else:
-        print(f'\nError: Failed to create playlist for {playlist_name}.\nAborting ...')
+    if not playlist_url:
+        print(f'\nError: Failed to create playlist for {playcfg.name}.\nAborting ...')
         sys.exit(1)
 
-    print(f'Step: Add artists top tracks ...')
-    chunked_tracks = [playlist_tracks[i:i+100] for i in range(0, len(playlist_tracks), 100)]
+    print(f'Step 5: Add artists top tracks ...')
+    chunked_tracks = [toptracks[i:i+100] for i in range(0, len(toptracks), 100)]
     for tracks_to_add in chunked_tracks:
-        sp.playlist_add_items(new_playlist['id'], tracks_to_add) # raises on failure
+        spotapi.playlist_add_items(new_playlist['id'], tracks_to_add) # raises on failure
+
+    print()
+    print('Playlist created')
+    print(f'  Name: {playcfg.name}')
+    print(f'  Desc: {playcfg.desc}')
+    print(f'  Url:  {playlist_url}')
 
     sys.exit(0)
