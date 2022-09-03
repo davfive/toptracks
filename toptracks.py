@@ -219,7 +219,7 @@ if __name__ == '__main__':
         sys.exit(1)
 
     print(f'Step 3: Find top tracks for artists ...')
-    toptracks = get_artists_toptracks(spotapi, playcfg)
+    toptracks = get_artists_toptracks(spotapi, playcfg, maxtracks_per_artist=args.max_toptracks)
     if not toptracks:
         print('\nError: No toptracks found for any artist in playlist. Aborting.')
         sys.exit(1)
