@@ -194,7 +194,7 @@ if __name__ == '__main__':
                         help='INI file with sections having lists of artists')
     parser.add_argument('--skip-missing-artists', '--sma', dest='skip_missing_artists', action='store_true',
                          help="Skip artists without resolved Spotify url.")
-    parser.add_argument('--max-toptracks', "-n", dest="max_toptracks", default=5, type=int, 
+    parser.add_argument('--max-toptracks', "-n", dest="max_toptracks", default=3, type=int, 
                         help="Max top tracks to include per artist")
     args = parser.parse_args()
 
