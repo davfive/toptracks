@@ -1,5 +1,6 @@
 import argparse
 import configparser
+from difflib import SequenceMatcher
 from dotenv import load_dotenv
 from functools import reduce
 from pathlib import Path
@@ -14,6 +15,26 @@ SPOTIFY_ACCESS_SCOPES = [
     'playlist-read-private',
     'playlist-modify-public'
 ]
+
+SPOTIFY_MARKETS = [
+    "AD","AE","AF","AG","AI","AL","AM","AO","AQ","AR","AS","AT","AU","AW","AX","AZ",
+    "BA","BB","BD","BE","BF","BG","BH","BI","BJ","BL","BM","BN","BO","BQ","BS","BT",
+    "BV","BW","BY","BZ","CA","CC","CD","CF","CG","CH","CI","CM","CN","CO","CR","CU",
+    "CV","CX","CY","CZ","DE","DJ","DK","DM","DO","DZ","EC","EE","EG","EH","ER","ES",
+    "ET","FI","FJ","FK","FO","FR","GA","GB","GD","GE","GF","GG","GH","GI","GL","GM",
+    "GN","GP","GQ","GR","GS","GT","GU","GW","GY","HK","HM","HN","HR","HT","HU","ID",
+    "IE","IL","IM","IN","IO","IQ","IR","IS","IT","JE","JM","JO","JP","KE","KG","KH",
+    "KI","KM","KN","KP","KR","KW","KY","KZ","LA","LB","LC","LI","LK","LR","LS","LT",
+    "LU","LV","LY","MA","MC","MD","ME","MF","MG","MH","MK","ML","MM","MN","MO","MP",
+    "MQ","MR","MS","MT","MU","MV","MW","MX","MY","MZ","NA","NC","NE","NF","NG","NI",
+    "NL","NO","NP","NR","NU","NZ","OM","PA","PE","PF","PG","PH","PK","PL","PM","PN",
+    "PR","PS","PT","PW","PY","QA","RE","RO","RS","RU","RW","SA","SB","SC","SD","SE",
+    "SG","SH","SI","SJ","SK","SL","SM","SN","SO","SR","SS","ST","SV","SX","SY","SZ",
+    "TC","TD","TF","TG","TH","TJ","TK","TL","TM","TN","TO","TR","TT","TV","TW","TZ",
+    "UA","UG","UM","US","UY","UZ","VA","VC","VE","VG","VI","VN","VU","WF","WS","YE",
+    "YT","ZA","ZM","ZW"
+]
+
 class PlaylistConfig(configparser.RawConfigParser):
     _section_info = 'playlist.info'
     _section_artists = 'playlist.artists'
@@ -85,11 +106,13 @@ class SpotifyAPI(spotipy.Spotify):
         return self.me()
 
     def find_artist(self, artist_name):
+        min_ratio_for_match = 0.4
         matches = []
-        for results in SpotifyResultsGenerator(self, self.search, 'artists.next').get(f'name:{artist_name}', type='artist'):
+        for results in SpotifyResultsGenerator(self, self.search, 'artists.next').get(f'name:{artist_name}', type='artist', market=SPOTIFY_MARKETS):
             artists = results['artists']
             for i, artist in enumerate(artists['items']):
-                if artist['name'].casefold() == artist_name.casefold():
+                if SequenceMatcher(None, artist_name, artist['name']).ratio() > min_ratio_for_match:
+                    # if artist['name'].casefold() == artist_name.casefold():
                     matches.append(SpotifyArtist(artist))
         return matches
 
@@ -128,22 +151,22 @@ class SpotifyArtist:
         return self._json.get('followers', {}).get('total', 0)
 
 class SpotifyResultsGenerator:
-    def __init__(self, sp, fn, subnext=None):
-        self._sp = sp
-        self._fn = fn
+    def __init__(self, spotify, method, subnext=None):
+        self._spotify = spotify
+        self._method = method
         self._subnext = subnext
 
     def get(self, *args, **kwargs):
         try:
-            results = self._fn(*args, **kwargs)
+            results = self._method(*args, **kwargs)
             yield results
             if self._subnext is None:
                 while results['next']:
-                    results = self._sp.next(results)
+                    results = self._spotify.next(results)
                     yield results
             else:
                 while results.get(self._subnext, {}).get('next', None):
-                    results = self._sp.next(results[self._subnext])
+                    results = self._spotify.next(results[self._subnext])
                     yield results
         
         except Exception as e:
