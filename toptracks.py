@@ -259,6 +259,9 @@ if __name__ == '__main__':
     for tracks_to_add in chunked_tracks:
         spotapi.playlist_add_items(new_playlist['id'], tracks_to_add) # raises on failure
 
+    playcfg.spotify_url = playlist_url
+    playcfg.save()
+
     print()
     print('Playlist created')
     print(f'  Name: {playcfg.name}')
